@@ -71,6 +71,7 @@ TMP_DIR=""
 FORCE=0
 ASSUME_YES=0
 HY_ENABLED=1
+HY_CLI_DISABLED=0
 
 LISTEN_ADDR=""
 CLIENT_HOST=""
@@ -907,19 +908,36 @@ show_summary() {
   printf "  管理命令: bash %s --status | --links | --upgrade | --update | --uninstall\n" "$SELF"
 }
 
+report_legacy() {
+  [ "${LEGACY_REPORTED:-0}" = "1" ] && return 0
+  LEGACY_REPORTED=1
+
+  local legacy=""
+  if [ -x /opt/suoha/xray ] || [ -x /opt/suoha/cloudflared-linux ]; then
+    legacy="named"
+  elif have ps && { ps -ef 2>/dev/null | grep -q '[c]loudflared-linux' || ps -ef 2>/dev/null | grep -q '[x]ray/xray'; }; then
+    legacy="quick"
+  fi
+
+  if [ -n "$legacy" ]; then
+    warn "检测到旧版 suoha / Cloudflare Argo 仍在运行。"
+    warn "新版使用独立服务，不会与它冲突；为避免新节点未验证前断网，脚本不自动删除旧版。"
+    if [ "$legacy" = "named" ]; then
+      warn "新节点验证通过后，可清理: systemctl disable --now xray cloudflared 2>/dev/null; rm -rf /opt/suoha"
+    else
+      warn "新节点验证通过后，可清理: pkill -f 'cloudflared-linux tunnel'; pkill -f 'xray/xray run'"
+    fi
+  fi
+}
+
 do_install() {
   need_root
+  report_legacy
 
   if [ -f "$STATE_FILE" ] && [ "$FORCE" != "1" ]; then
-    warn "检测到已安装。为避免更换凭证导致现有客户端失效，本次不重新部署。"
-    if have systemctl && ! systemctl is-active --quiet suoha-xray 2>/dev/null; then
-      warn "suoha-xray 当前未运行，可先尝试原地修复: bash $SELF --upgrade"
-    fi
-    warn "保留现有节点升级（UUID/密码/端口不变）: bash $SELF --upgrade"
-    warn "如需重新部署（会生成新 UUID/密码）: bash $SELF --install --force"
-    show_status
-    show_links
-    return 0
+    info "检测到已安装，自动原地升级（保留 UUID / 密码 / 端口）"
+    do_upgrade
+    return $?
   fi
 
   detect_os
@@ -1015,6 +1033,7 @@ do_install() {
 
 do_upgrade() {
   need_root
+  report_legacy
   require_systemd
   if [ ! -f "$STATE_FILE" ]; then
     die "尚未安装，请先运行: bash $SELF --install"
@@ -1023,18 +1042,29 @@ do_upgrade() {
     die "找不到现有 Xray 配置: $XRAY_CONF，请改用: bash $SELF --install --force"
   fi
   if [ ! -x "$XRAY_BIN" ]; then
-    die "找不到 Xray 核心: $XRAY_BIN，请先运行: bash $SELF --update"
+    warn "缺少 Xray 核心，自动重新安装..."
+    detect_os
+    install_deps || die "依赖安装失败"
+    install_xray_core || die "Xray 核心安装失败"
   fi
-
   load_state
+  if [ "$HY_CLI_DISABLED" = "1" ]; then
+    HY_ENABLED=0
+    HY_PORT="0"
+  fi
   REALITY_PRIV="$(sed -n 's/.*"privateKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$XRAY_CONF" | head -n 1)"
   if [ -z "$REALITY_PRIV" ] || [ -z "${UUID:-}" ] || [ -z "${REALITY_PUB:-}" ] || [ -z "${SID:-}" ]; then
     die "现有配置缺少凭证信息，请改用: bash $SELF --install --force"
   fi
   if [ "$HY_ENABLED" = "1" ] && [ ! -x "$HY_BIN" ]; then
-    warn "找不到 Hysteria2 核心，本次仅升级 REALITY 监听"
-    HY_ENABLED=0
-    HY_PORT="0"
+    warn "缺少 Hysteria2 核心，自动重新安装..."
+    detect_os
+    install_deps || die "依赖安装失败"
+    install_hysteria_core || {
+      warn "Hysteria2 核心安装失败，本次仅升级 REALITY 监听"
+      HY_ENABLED=0
+      HY_PORT="0"
+    }
   fi
   if [ "$HY_ENABLED" = "1" ] && [ -z "${HY_OBFS:-}" ]; then
     HY_OBFS="$(openssl rand -hex 16)"
@@ -1271,7 +1301,7 @@ usage() {
   cat <<EOF
 用法: bash $SELF [选项]
 
-  --install          部署（已安装时仅显示状态）
+  --install          智能部署（已安装时自动原地升级，保留凭证）
   --install --force  强制重新部署（更换凭证）
   --upgrade          原地升级监听方式（保留 UUID/密码/端口）
   --no-hysteria      仅部署 REALITY
@@ -1281,7 +1311,8 @@ usage() {
   --uninstall        卸载（--yes 跳过确认）
   --help             显示帮助
 
-不带参数时进入交互菜单；非交互环境（如 curl | bash）会直接部署。
+不带参数时进入交互菜单；非交互环境（如 curl | bash）会直接智能部署。
+重复执行同一条 --install 命令会保留 UUID/密码/端口并自动升级。
 EOF
 }
 
@@ -1297,7 +1328,7 @@ main() {
       --uninstall) action="uninstall" ;;
       --yes|-y) ASSUME_YES=1 ;;
       --force|-f) FORCE=1 ;;
-      --no-hysteria) HY_ENABLED=0 ;;
+      --no-hysteria) HY_ENABLED=0; HY_CLI_DISABLED=1 ;;
       --help|-h) usage; return 0 ;;
       *)
         err "未知参数: $1"

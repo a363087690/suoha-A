@@ -19,6 +19,16 @@ curl -fsSL https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha.sh -o
 wget -O suoha.sh https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha.sh && bash suoha.sh
 ```
 
+同一条命令可以重复执行：首次是全新安装，之后自动原地升级，UUID、密码、端口和旧节点链接都保持不变。只有加 `--force` 才会重新生成凭证。
+
+## 自动维护
+
+- 重复执行部署命令即自动升级，不会更换凭证
+- systemd 崩溃自动拉起，服务器重启自动启动
+- 内核更新前先校验配置，失败自动回滚旧内核
+- 缺少 Xray / Hysteria2 核心时自动重新安装
+- 检测到旧版 Cloudflare Argo / suoha 时只提示清理命令，不自动断网
+
 ## 要求
 
 - root 权限
