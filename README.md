@@ -7,6 +7,8 @@
 | 主通道 | VLESS + Vision + REALITY | TCP | 443 | 无需域名和证书，抗封锁 |
 | 备通道 | Hysteria2 | UDP/QUIC | 8443 | 弱网/高丢包环境提速 |
 
+Xray-core 固定使用 v25.9.11（REALITY / VLESS Vision 已验证），Hysteria2 跟随官方最新版。
+
 ## 一键部署
 
 ```bash

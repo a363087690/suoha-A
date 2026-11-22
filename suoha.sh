@@ -54,6 +54,7 @@ line() { printf '%s\n' "--------------------------------------------------------
 SUOHA_DIR="/etc/suoha"
 STATE_FILE="$SUOHA_DIR/state.env"
 XRAY_BIN="/usr/local/bin/suoha-xray"
+XRAY_VERSION="25.9.11"
 XRAY_CONF="/usr/local/etc/suoha/xray.json"
 XRAY_UNIT="/etc/systemd/system/suoha-xray.service"
 HY_BIN="/usr/local/bin/suoha-hysteria"
@@ -201,8 +202,8 @@ fetch() {
 
 install_xray_core() {
   ensure_tmp
-  info "下载 Xray-core ($XRAY_ASSET)..."
-  if ! fetch "https://github.com/XTLS/Xray-core/releases/latest/download/$XRAY_ASSET" "$TMP_DIR/xray.zip"; then
+  info "下载 Xray-core v$XRAY_VERSION ($XRAY_ASSET)..."
+  if ! fetch "https://github.com/XTLS/Xray-core/releases/download/v$XRAY_VERSION/$XRAY_ASSET" "$TMP_DIR/xray.zip"; then
     return 1
   fi
   rm -rf "$TMP_DIR/xray"
