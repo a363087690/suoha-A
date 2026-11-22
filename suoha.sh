@@ -586,6 +586,10 @@ EOF
 optimize_kernel() {
   local cc
   cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+  if ! printf '%s' "$cc" | grep -qw "bbr"; then
+    modprobe tcp_bbr >/dev/null 2>&1 || true
+    cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+  fi
 
   {
     echo "# suoha-ai: 自动生成的网络优化参数"
@@ -906,9 +910,11 @@ show_summary() {
 do_install() {
   need_root
 
-  if [ -f "$STATE_FILE" ] && [ "$FORCE" != "1" ] && \
-     have systemctl && systemctl is-active --quiet suoha-xray 2>/dev/null; then
-    warn "检测到已安装。为避免更换凭证导致现有客户端失效，本次仅显示状态。"
+  if [ -f "$STATE_FILE" ] && [ "$FORCE" != "1" ]; then
+    warn "检测到已安装。为避免更换凭证导致现有客户端失效，本次不重新部署。"
+    if have systemctl && ! systemctl is-active --quiet suoha-xray 2>/dev/null; then
+      warn "suoha-xray 当前未运行，可先尝试原地修复: bash $SELF --upgrade"
+    fi
     warn "保留现有节点升级（UUID/密码/端口不变）: bash $SELF --upgrade"
     warn "如需重新部署（会生成新 UUID/密码）: bash $SELF --install --force"
     show_status
@@ -1072,6 +1078,9 @@ do_upgrade() {
 
   write_units
   systemctl daemon-reload
+  if [ "$HY_ENABLED" != "1" ]; then
+    systemctl disable --now suoha-hysteria >/dev/null 2>&1 || true
+  fi
 
   systemctl restart suoha-xray >/dev/null 2>&1 || true
   sleep 2
@@ -1111,16 +1120,52 @@ do_update() {
   require_systemd
   install_deps || die "依赖安装失败"
   load_state
+  if [ ! -f "$XRAY_CONF" ]; then
+    die "找不到 Xray 配置: $XRAY_CONF，请先运行: bash $SELF --install --force"
+  fi
 
-  install_xray_core || die "Xray-core 下载失败"
+  local xray_bak="" hy_bak=""
+  if [ -x "$XRAY_BIN" ]; then
+    xray_bak="$XRAY_BIN.bak"
+    cp -a "$XRAY_BIN" "$xray_bak" || die "无法备份现有 Xray 核心"
+  fi
+  if [ "$HY_ENABLED" = "1" ] && [ -x "$HY_BIN" ]; then
+    hy_bak="$HY_BIN.bak"
+    cp -a "$HY_BIN" "$hy_bak" || warn "无法备份 Hysteria2 核心，更新失败时将无法回滚"
+  fi
+
+  if ! install_xray_core; then
+    [ -n "$xray_bak" ] && cp -a "$xray_bak" "$XRAY_BIN"
+    die "Xray-core 下载失败，已保留旧内核"
+  fi
+  if ! "$XRAY_BIN" run -test -c "$XRAY_CONF" >/dev/null 2>&1; then
+    [ -n "$xray_bak" ] && cp -a "$xray_bak" "$XRAY_BIN"
+    die "新 Xray 内核不兼容当前配置，已回滚旧内核"
+  fi
+
   if [ "$HY_ENABLED" = "1" ]; then
     install_hysteria_core || warn "Hysteria2 下载失败，保留旧版本"
   fi
 
-  systemctl restart suoha-xray || die "Xray 重启失败"
-  if [ "$HY_ENABLED" = "1" ]; then
-    systemctl restart suoha-hysteria || warn "Hysteria2 重启失败"
+  if ! systemctl restart suoha-xray; then
+    if [ -n "$xray_bak" ]; then
+      cp -a "$xray_bak" "$XRAY_BIN"
+      systemctl restart suoha-xray >/dev/null 2>&1 || true
+    fi
+    die "Xray 重启失败，已回滚旧内核"
   fi
+  if [ "$HY_ENABLED" = "1" ]; then
+    if ! systemctl restart suoha-hysteria; then
+      warn "Hysteria2 重启失败"
+      if [ -n "$hy_bak" ]; then
+        cp -a "$hy_bak" "$HY_BIN"
+        systemctl restart suoha-hysteria >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+
+  [ -n "$xray_bak" ] && rm -f "$xray_bak"
+  [ -n "$hy_bak" ] && rm -f "$hy_bak"
   info "内核更新完成"
   show_status
 }

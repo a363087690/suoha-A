@@ -22,7 +22,7 @@ wget -O suoha.sh https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha
 ## 要求
 
 - root 权限
-- systemd（KVM 等常规 VPS，OpenVZ/LXC 不支持）
+- systemd（Alpine/OpenRC、OpenVZ/LXC 容器不支持）
 - 公网 IPv4 或 IPv6
 - 放行 TCP 443 与 UDP 8443
 
@@ -73,6 +73,8 @@ bash suoha.sh --update
 bash suoha.sh --no-hysteria    # 仅部署 REALITY
 bash suoha.sh --uninstall --yes
 ```
+
+`--install` 在检测到已安装时只显示状态，不会更换凭证；只有 `--install --force` 会重新生成 UUID / 密码。`--update` 会先校验新内核能否读取现有配置，启动失败会自动回滚旧内核。
 
 ## 原地升级
 
