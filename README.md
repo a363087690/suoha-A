@@ -10,13 +10,13 @@
 ## 一键部署
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha.sh -o suoha.sh && bash suoha.sh
+curl -fsSL https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha.sh -o suoha.sh && bash suoha.sh --install
 ```
 
 或：
 
 ```bash
-wget -O suoha.sh https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha.sh && bash suoha.sh
+wget -O suoha.sh https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha.sh && bash suoha.sh --install
 ```
 
 同一条命令可以重复执行：首次是全新安装，之后自动原地升级，UUID、密码、端口和旧节点链接都保持不变。只有加 `--force` 才会重新生成凭证。
