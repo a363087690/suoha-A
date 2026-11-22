@@ -11,7 +11,9 @@
 #    - 自动测速挑选 REALITY 伪装目标
 #    - 443 被占用时自动换端口
 #    - Hysteria2 不可用时自动降级为纯 REALITY
-#    - BBR + fq + 文件句柄优化
+#    - BBR + fq + TCP/MTU 弱网优化
+#    - Hysteria2 salamander 混淆，适配大陆移动网络
+#    - 伪装目标排除 Google 等易被 SNI 拦截/DNS 污染的域名
 #    - systemd 崩溃自动重启
 #    - 生成客户端链接和 Clash Meta 自动择优配置
 #
@@ -88,6 +90,7 @@ HY_PORT="0"
 HY_PASS=""
 HY_SNI="www.bing.com"
 HY_PIN=""
+HY_OBFS=""
 
 SELF="${0##*/}"
 case "$SELF" in
@@ -234,12 +237,12 @@ gen_material() {
   UUID="$("$XRAY_BIN" uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
   SID="$(openssl rand -hex 8)"
   HY_PASS="$(openssl rand -hex 16)"
+  HY_OBFS="$(openssl rand -hex 16)"
 }
 
 SNI_CANDIDATES=(
-  "www.cloudflare.com"
-  "dl.google.com"
   "www.bing.com"
+  "www.cloudflare.com"
   "www.samsung.com"
   "www.lovelive-anime.jp"
 )
@@ -503,6 +506,20 @@ tls:
 auth:
   type: password
   password: $HY_PASS
+EOF
+  if [ -n "${HY_OBFS:-}" ]; then
+    cat >> "$HY_CONF" <<EOF
+obfs:
+  type: salamander
+  salamander:
+    password: $HY_OBFS
+EOF
+  fi
+  cat >> "$HY_CONF" <<EOF
+quic:
+  maxIdleTimeout: 60s
+  keepAlivePeriod: 10s
+  disablePathMTUDiscovery: true
 masquerade:
   type: proxy
   proxy:
@@ -574,10 +591,19 @@ optimize_kernel() {
     echo "# suoha-ai: 自动生成的网络优化参数"
     echo "fs.file-max = 1048576"
     echo "net.core.somaxconn = 65535"
-    echo "net.core.rmem_max = 16777216"
-    echo "net.core.wmem_max = 16777216"
+    echo "net.core.netdev_max_backlog = 65535"
+    echo "net.core.rmem_max = 33554432"
+    echo "net.core.wmem_max = 33554432"
+    echo "net.ipv4.tcp_rmem = 4096 87380 33554432"
+    echo "net.ipv4.tcp_wmem = 4096 65536 33554432"
     echo "net.ipv4.tcp_fastopen = 3"
     echo "net.ipv4.tcp_max_syn_backlog = 65535"
+    echo "net.ipv4.tcp_mtu_probing = 1"
+    echo "net.ipv4.tcp_slow_start_after_idle = 0"
+    echo "net.ipv4.tcp_notsent_lowat = 131072"
+    echo "net.ipv4.tcp_tw_reuse = 1"
+    echo "net.ipv4.tcp_fin_timeout = 15"
+    echo "net.ipv4.ip_local_port_range = 1024 65535"
     if printf '%s' "$cc" | grep -qw "bbr"; then
       echo "net.core.default_qdisc = fq"
       echo "net.ipv4.tcp_congestion_control = bbr"
@@ -642,6 +668,7 @@ HY_PORT=$HY_PORT
 HY_PASS="$HY_PASS"
 HY_SNI="$HY_SNI"
 HY_PIN="$HY_PIN"
+HY_OBFS="$HY_OBFS"
 EOF
   chmod 600 "$STATE_FILE"
 }
@@ -655,6 +682,7 @@ load_state() {
   DUAL_STACK="${DUAL_STACK:-0}"
   CLIENT_V4="${CLIENT_V4:-}"
   CLIENT_V6="${CLIENT_V6:-}"
+  HY_OBFS="${HY_OBFS:-}"
   if [ -z "$CLIENT_V4" ] && [ "${HOST_IS_V6:-0}" = "0" ]; then
     CLIENT_V4="$CLIENT_HOST"
   fi
@@ -681,6 +709,9 @@ hysteria_link() {
   local params="sni=$HY_SNI&insecure=1"
   if [ -n "${HY_PIN:-}" ]; then
     params="$params&pinSHA256=$HY_PIN"
+  fi
+  if [ -n "${HY_OBFS:-}" ]; then
+    params="$params&obfs=salamander&obfs-password=$HY_OBFS"
   fi
   printf 'hysteria2://%s@%s:%s/?%s#%s' \
     "$HY_PASS" "$(fmt_host "$host")" "$HY_PORT" "$params" "$tag"
@@ -711,6 +742,11 @@ EOF
     server: "$server"
     port: $HY_PORT
     password: "$HY_PASS"
+EOF
+    if [ -n "${HY_OBFS:-}" ]; then
+      printf '    obfs: salamander\n    obfs-password: "%s"\n' "$HY_OBFS"
+    fi
+    cat <<EOF
     sni: "$HY_SNI"
     skip-cert-verify: true
 EOF
@@ -741,6 +777,10 @@ allow-lan: false
 mode: rule
 log-level: info
 ipv6: true
+tcp-concurrent: true
+unified-delay: true
+find-process-mode: off
+keep-alive-interval: 30
 proxies:
 EOF
     clash_proxies_for "${CLIENT_V4:-$CLIENT_HOST}" "$s4"
@@ -989,6 +1029,10 @@ do_upgrade() {
     warn "找不到 Hysteria2 核心，本次仅升级 REALITY 监听"
     HY_ENABLED=0
     HY_PORT="0"
+  fi
+  if [ "$HY_ENABLED" = "1" ] && [ -z "${HY_OBFS:-}" ]; then
+    HY_OBFS="$(openssl rand -hex 16)"
+    warn "已为 Hysteria2 启用 salamander 混淆；升级后请重新导入 Hysteria2 节点（REALITY 节点不受影响）"
   fi
 
   info "原地升级：保留 UUID / 密码 / 端口，仅按当前网络环境更新监听"
