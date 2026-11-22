@@ -21,6 +21,7 @@
 #  用法:
 #    bash suoha.sh                 交互菜单（非交互环境直接部署）
 #    bash suoha.sh --install       部署（已安装则只显示状态）
+#    bash suoha.sh --upgrade       原地升级监听（保留 UUID/密码/端口）
 #    bash suoha.sh --install --force
 #    bash suoha.sh --status
 #    bash suoha.sh --links
@@ -466,15 +467,19 @@ write_hysteria_config() {
   mkdir -p "$SUOHA_DIR"
   chmod 700 "$SUOHA_DIR"
 
-  info "生成 Hysteria2 自签证书..."
-  "$HY_BIN" cert --host "$HY_SNI" \
-      --cert "$SUOHA_DIR/cert.pem" \
-      --key "$SUOHA_DIR/key.pem" \
-      --valid-for 87600h --overwrite >/dev/null 2>&1 || {
-    openssl ecparam -genkey -name prime256v1 -out "$SUOHA_DIR/key.pem" >/dev/null 2>&1 || return 1
-    openssl req -new -x509 -days 3650 -key "$SUOHA_DIR/key.pem" \
-      -out "$SUOHA_DIR/cert.pem" -subj "/CN=$HY_SNI" >/dev/null 2>&1 || return 1
-  }
+  if [ ! -s "$SUOHA_DIR/cert.pem" ] || [ ! -s "$SUOHA_DIR/key.pem" ]; then
+    info "生成 Hysteria2 自签证书..."
+    "$HY_BIN" cert --host "$HY_SNI" \
+        --cert "$SUOHA_DIR/cert.pem" \
+        --key "$SUOHA_DIR/key.pem" \
+        --valid-for 87600h --overwrite >/dev/null 2>&1 || {
+      openssl ecparam -genkey -name prime256v1 -out "$SUOHA_DIR/key.pem" >/dev/null 2>&1 || return 1
+      openssl req -new -x509 -days 3650 -key "$SUOHA_DIR/key.pem" \
+        -out "$SUOHA_DIR/cert.pem" -subj "/CN=$HY_SNI" >/dev/null 2>&1 || return 1
+    }
+  else
+    info "复用已有 Hysteria2 证书（pinSHA256 不变）"
+  fi
 
   HY_PIN="$(openssl x509 -in "$SUOHA_DIR/cert.pem" -outform der 2>/dev/null \
     | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
@@ -855,7 +860,7 @@ show_summary() {
   printf "  服务名  : suoha-xray"
   [ "$HY_ENABLED" = "1" ] && printf ", suoha-hysteria"
   printf "\n"
-  printf "  管理命令: bash %s --status | --links | --update | --uninstall\n" "$SELF"
+  printf "  管理命令: bash %s --status | --links | --upgrade | --update | --uninstall\n" "$SELF"
 }
 
 do_install() {
@@ -864,6 +869,7 @@ do_install() {
   if [ -f "$STATE_FILE" ] && [ "$FORCE" != "1" ] && \
      have systemctl && systemctl is-active --quiet suoha-xray 2>/dev/null; then
     warn "检测到已安装。为避免更换凭证导致现有客户端失效，本次仅显示状态。"
+    warn "保留现有节点升级（UUID/密码/端口不变）: bash $SELF --upgrade"
     warn "如需重新部署（会生成新 UUID/密码）: bash $SELF --install --force"
     show_status
     show_links
@@ -961,6 +967,100 @@ do_install() {
   show_links
 }
 
+do_upgrade() {
+  need_root
+  require_systemd
+  if [ ! -f "$STATE_FILE" ]; then
+    die "尚未安装，请先运行: bash $SELF --install"
+  fi
+  if [ ! -f "$XRAY_CONF" ]; then
+    die "找不到现有 Xray 配置: $XRAY_CONF，请改用: bash $SELF --install --force"
+  fi
+  if [ ! -x "$XRAY_BIN" ]; then
+    die "找不到 Xray 核心: $XRAY_BIN，请先运行: bash $SELF --update"
+  fi
+
+  load_state
+  REALITY_PRIV="$(sed -n 's/.*"privateKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$XRAY_CONF" | head -n 1)"
+  if [ -z "$REALITY_PRIV" ] || [ -z "${UUID:-}" ] || [ -z "${REALITY_PUB:-}" ] || [ -z "${SID:-}" ]; then
+    die "现有配置缺少凭证信息，请改用: bash $SELF --install --force"
+  fi
+  if [ "$HY_ENABLED" = "1" ] && [ ! -x "$HY_BIN" ]; then
+    warn "找不到 Hysteria2 核心，本次仅升级 REALITY 监听"
+    HY_ENABLED=0
+    HY_PORT="0"
+  fi
+
+  info "原地升级：保留 UUID / 密码 / 端口，仅按当前网络环境更新监听"
+  detect_endpoint
+
+  local backup
+  backup="$SUOHA_DIR/backup-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$backup"
+  chmod 700 "$backup"
+  cp -a "$XRAY_CONF" "$backup/xray.json"
+  if [ -f "$HY_CONF" ]; then
+    cp -a "$HY_CONF" "$backup/hysteria.yaml"
+  fi
+  info "旧配置已备份到 $backup"
+
+  systemctl stop suoha-xray suoha-hysteria >/dev/null 2>&1 || true
+  sleep 1
+
+  if ! write_xray_config; then
+    cp -a "$backup/xray.json" "$XRAY_CONF"
+    systemctl start suoha-xray >/dev/null 2>&1 || true
+    die "Xray 新配置校验失败，已回滚旧配置"
+  fi
+  info "Xray 配置校验通过"
+
+  if [ "$HY_ENABLED" = "1" ]; then
+    if ! write_hysteria_config; then
+      cp -a "$backup/xray.json" "$XRAY_CONF"
+      if [ -f "$backup/hysteria.yaml" ]; then
+        cp -a "$backup/hysteria.yaml" "$HY_CONF"
+      fi
+      systemctl start suoha-xray suoha-hysteria >/dev/null 2>&1 || true
+      die "Hysteria2 新配置校验失败，已回滚旧配置"
+    fi
+    info "Hysteria2 配置校验通过"
+  fi
+
+  write_units
+  systemctl daemon-reload
+
+  systemctl restart suoha-xray >/dev/null 2>&1 || true
+  sleep 2
+  if ! systemctl is-active --quiet suoha-xray; then
+    journalctl -u suoha-xray -n 30 --no-pager 2>/dev/null || true
+    cp -a "$backup/xray.json" "$XRAY_CONF"
+    if [ -f "$backup/hysteria.yaml" ]; then
+      cp -a "$backup/hysteria.yaml" "$HY_CONF"
+    fi
+    systemctl restart suoha-xray suoha-hysteria >/dev/null 2>&1 || true
+    die "Xray 启动失败，已回滚旧配置"
+  fi
+
+  if [ "$HY_ENABLED" = "1" ]; then
+    systemctl restart suoha-hysteria >/dev/null 2>&1 || true
+    sleep 2
+    if ! systemctl is-active --quiet suoha-hysteria; then
+      journalctl -u suoha-hysteria -n 30 --no-pager 2>/dev/null || true
+      warn "Hysteria2 未能启动，REALITY 仍可用；请检查上面的日志"
+    fi
+  fi
+
+  save_state
+  write_clash_config
+
+  if [ "${DUAL_STACK:-0}" = "1" ]; then
+    info "升级完成：现已同时支持 IPv4 和 IPv6，原节点 UUID / 密码 / 端口未变"
+  else
+    info "升级完成：监听方式已更新，原节点 UUID / 密码 / 端口未变"
+  fi
+  show_links
+}
+
 do_update() {
   need_root
   detect_os
@@ -1016,41 +1116,62 @@ banner() {
 }
 
 main_menu() {
-  local choice default a
+  local choice default a installed
   while true; do
     banner
-    if [ -f "$STATE_FILE" ]; then
-      printf "  1) 重新部署（生成新凭证）\n"
-      default=2
+    installed=0
+    [ -f "$STATE_FILE" ] && installed=1
+    if [ "$installed" = "1" ]; then
+      printf "  1) 原地升级（保留 UUID/密码/端口，推荐）\n"
+      printf "  2) 重新部署（生成新凭证）\n"
+      printf "  3) 查看运行状态\n"
+      printf "  4) 查看节点链接\n"
+      printf "  5) 更新内核\n"
+      printf "  6) 卸载\n"
     else
       printf "  1) 智能部署（推荐）\n"
-      default=1
+      printf "  2) 查看运行状态\n"
+      printf "  3) 查看节点链接\n"
+      printf "  4) 更新内核\n"
+      printf "  5) 卸载\n"
     fi
-    printf "  2) 查看运行状态\n"
-    printf "  3) 查看节点链接\n"
-    printf "  4) 更新内核\n"
-    printf "  5) 卸载\n"
     printf "  0) 退出\n\n"
+    default=1
 
     read -rp "请选择 [$default]: " choice || exit 0
     choice="${choice:-$default}"
 
     case "$choice" in
       1)
-        if [ -f "$STATE_FILE" ]; then
+        if [ "$installed" = "1" ]; then
+          do_upgrade || true
+        else
+          do_install || true
+        fi
+        ;;
+      2)
+        if [ "$installed" = "1" ]; then
           read -rp "重新部署会更换 UUID/密码，现有客户端会失效。继续? [y/N]: " a || a=""
           case "$a" in
             y|Y|yes|YES) FORCE=1; do_install || true ;;
             *) ;;
           esac
         else
-          do_install || true
+          show_status
         fi
         ;;
-      2) show_status ;;
-      3) show_links ;;
-      4) do_update || true ;;
-      5) do_uninstall ;;
+      3)
+        if [ "$installed" = "1" ]; then show_status; else show_links; fi
+        ;;
+      4)
+        if [ "$installed" = "1" ]; then show_links; else do_update || true; fi
+        ;;
+      5)
+        if [ "$installed" = "1" ]; then do_update || true; else do_uninstall; fi
+        ;;
+      6)
+        [ "$installed" = "1" ] && do_uninstall
+        ;;
       0) exit 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -1063,6 +1184,7 @@ usage() {
 
   --install          部署（已安装时仅显示状态）
   --install --force  强制重新部署（更换凭证）
+  --upgrade          原地升级监听方式（保留 UUID/密码/端口）
   --no-hysteria      仅部署 REALITY
   --status           查看服务状态
   --links            查看节点链接
@@ -1079,6 +1201,7 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --install|install) action="install" ;;
+      --upgrade|upgrade) action="upgrade" ;;
       --status) action="status" ;;
       --links) action="links" ;;
       --update) action="update" ;;
@@ -1098,6 +1221,7 @@ main() {
 
   case "$action" in
     install) do_install ;;
+    upgrade) do_upgrade ;;
     status) show_status ;;
     links) show_links ;;
     update) do_update ;;

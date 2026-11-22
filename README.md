@@ -50,12 +50,27 @@ wget -O suoha.sh https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha
 bash suoha.sh                  # 交互菜单（非交互环境直接部署）
 bash suoha.sh --install        # 部署；已安装则显示状态
 bash suoha.sh --install --force
+bash suoha.sh --upgrade        # 原地升级监听，保留 UUID/密码/端口
 bash suoha.sh --status
 bash suoha.sh --links
 bash suoha.sh --update
 bash suoha.sh --no-hysteria    # 仅部署 REALITY
 bash suoha.sh --uninstall --yes
 ```
+
+## 原地升级
+
+已经部署过的机器，如果要把监听从单栈切换成双栈（或反过来），用：
+
+```bash
+bash suoha.sh --upgrade
+```
+
+- UUID、REALITY 私钥、Hysteria2 密码、端口、证书和 `pinSHA256` 全部保持不变
+- 旧节点链接继续可用，只新增/调整 IPv4、IPv6 地址
+- 旧配置会备份在 `/etc/suoha/backup-时间戳/`，新配置校验失败会自动回滚
+
+如果需要更换凭证（旧客户端全部失效），才使用 `--install --force`。
 
 部署完成后：
 
