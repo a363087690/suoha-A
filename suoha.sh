@@ -1053,7 +1053,37 @@ do_upgrade() {
     HY_PORT="0"
   fi
   REALITY_PRIV="$(sed -n 's/.*"privateKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$XRAY_CONF" | head -n 1)"
-  if [ -z "$REALITY_PRIV" ] || [ -z "${UUID:-}" ] || [ -z "${REALITY_PUB:-}" ] || [ -z "${SID:-}" ]; then
+  if [ -z "$REALITY_PRIV" ]; then
+    die "现有配置缺少 REALITY 私钥，请改用: bash $SELF --install --force"
+  fi
+
+  local cfg_uuid cfg_sid cfg_sni cfg_port derived_pub
+  cfg_uuid="$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$XRAY_CONF" | head -n 1)"
+  cfg_sid="$(sed -n 's/.*"shortIds"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$XRAY_CONF" | head -n 1)"
+  cfg_sni="$(sed -n 's/.*"serverNames"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$XRAY_CONF" | head -n 1)"
+  cfg_port="$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$XRAY_CONF" | head -n 1)"
+  if [ -n "$cfg_uuid" ] && [ "$cfg_uuid" != "${UUID:-}" ]; then
+    warn "state 中的 UUID 与服务端配置不一致，已按服务端配置修正"
+    UUID="$cfg_uuid"
+  fi
+  if [ -n "$cfg_sid" ] && [ "$cfg_sid" != "${SID:-}" ]; then
+    warn "state 中的 shortId 与服务端配置不一致，已按服务端配置修正"
+    SID="$cfg_sid"
+  fi
+  if [ -n "$cfg_sni" ] && [ "$cfg_sni" != "${REALITY_SNI:-}" ]; then
+    warn "state 中的伪装域名与服务端配置不一致，已按服务端配置修正"
+    REALITY_SNI="$cfg_sni"
+  fi
+  if [ -n "$cfg_port" ] && [ "$cfg_port" != "${PORT:-}" ]; then
+    warn "state 中的端口与服务端配置不一致，已按服务端配置修正"
+    PORT="$cfg_port"
+  fi
+  derived_pub="$("$XRAY_BIN" x25519 -i "$REALITY_PRIV" 2>/dev/null | awk -F': *' 'tolower($1) ~ /public|password/ {print $2; exit}')"
+  if [ -n "$derived_pub" ] && [ "$derived_pub" != "${REALITY_PUB:-}" ]; then
+    warn "state 中的 REALITY 公钥与服务端私钥不匹配，已自动修正"
+    REALITY_PUB="$derived_pub"
+  fi
+  if [ -z "${UUID:-}" ] || [ -z "${REALITY_PUB:-}" ] || [ -z "${SID:-}" ]; then
     die "现有配置缺少凭证信息，请改用: bash $SELF --install --force"
   fi
   if [ "$HY_ENABLED" = "1" ] && [ ! -x "$HY_BIN" ]; then
