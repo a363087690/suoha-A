@@ -7,6 +7,7 @@
 #
 #  特性:
 #    - 自动识别系统/架构/公网 IP
+#    - 支持 IPv4-only / IPv6-only / 双栈，双栈同时下发 v4/v6 节点
 #    - 自动测速挑选 REALITY 伪装目标
 #    - 443 被占用时自动换端口
 #    - Hysteria2 不可用时自动降级为纯 REALITY
@@ -70,7 +71,10 @@ HY_ENABLED=1
 
 LISTEN_ADDR=""
 CLIENT_HOST=""
+CLIENT_V4=""
+CLIENT_V6=""
 HOST_IS_V6=0
+DUAL_STACK=0
 PUB_V4=""
 PUB_V6=""
 PORT=""
@@ -241,7 +245,11 @@ SNI_CANDIDATES=(
 
 bench_sni() {
   local host="$1" t
-  t="$(curl -o /dev/null -sS --max-time 5 -w '%{time_appconnect}' "https://$host" 2>/dev/null)"
+  if [ "${HOST_IS_V6:-0}" = "1" ] && [ "${DUAL_STACK:-0}" != "1" ]; then
+    t="$(curl -6 -o /dev/null -sS --max-time 5 -w '%{time_appconnect}' "https://$host" 2>/dev/null)"
+  else
+    t="$(curl -4 -o /dev/null -sS --max-time 5 -w '%{time_appconnect}' "https://$host" 2>/dev/null)"
+  fi
   awk -v t="${t:-0}" 'BEGIN { if (t+0 > 0) printf "%d", t*1000; else print 999999 }'
 }
 
@@ -330,18 +338,29 @@ detect_endpoint() {
   info "检测公网 IP..."
   PUB_V4="$(get_public_ipv4 || true)"
   PUB_V6="$(get_public_ipv6 || true)"
+  CLIENT_V4="$PUB_V4"
+  CLIENT_V6="$PUB_V6"
 
-  if [ -n "$PUB_V4" ]; then
+  if [ -n "$PUB_V4" ] && [ -n "$PUB_V6" ]; then
+    CLIENT_HOST="$PUB_V4"
+    LISTEN_ADDR="::"
+    HOST_IS_V6=0
+    DUAL_STACK=1
+    info "公网 IPv4: $PUB_V4"
+    info "公网 IPv6: $PUB_V6"
+    info "检测到双栈，将同时下发 IPv4 和 IPv6 节点"
+  elif [ -n "$PUB_V4" ]; then
     CLIENT_HOST="$PUB_V4"
     LISTEN_ADDR="0.0.0.0"
     HOST_IS_V6=0
-    info "公网 IPv4: $PUB_V4"
-    [ -n "$PUB_V6" ] && info "公网 IPv6: $PUB_V6（默认使用 IPv4 下发节点）"
+    DUAL_STACK=0
+    info "公网 IPv4: $PUB_V4（单栈 IPv4）"
   elif [ -n "$PUB_V6" ]; then
     CLIENT_HOST="$PUB_V6"
     LISTEN_ADDR="::"
     HOST_IS_V6=1
-    info "仅检测到公网 IPv6: $PUB_V6"
+    DUAL_STACK=0
+    info "公网 IPv6: $PUB_V6（单栈 IPv6）"
   else
     die "未检测到公网 IP。若在 NAT/容器内，请先做端口映射；本脚本需要公网 VPS。"
   fi
@@ -462,14 +481,16 @@ write_hysteria_config() {
   [ -n "$HY_PIN" ] || return 1
 
   local hy_listen
-  if [ "${HOST_IS_V6:-0}" = "1" ]; then
+  if [ "${DUAL_STACK:-0}" = "1" ]; then
+    hy_listen=":$HY_PORT"
+  elif [ "${HOST_IS_V6:-0}" = "1" ]; then
     hy_listen="[::]:$HY_PORT"
   else
     hy_listen="0.0.0.0:$HY_PORT"
   fi
 
   cat > "$HY_CONF" <<EOF
-listen: $hy_listen
+listen: "$hy_listen"
 tls:
   cert: $SUOHA_DIR/cert.pem
   key: $SUOHA_DIR/key.pem
@@ -602,7 +623,10 @@ save_state() {
   chmod 700 "$SUOHA_DIR"
   cat > "$STATE_FILE" <<EOF
 CLIENT_HOST="$CLIENT_HOST"
+CLIENT_V4="$CLIENT_V4"
+CLIENT_V6="$CLIENT_V6"
 HOST_IS_V6=$HOST_IS_V6
+DUAL_STACK=$DUAL_STACK
 PORT=$PORT
 REALITY_SNI="$REALITY_SNI"
 UUID="$UUID"
@@ -623,41 +647,44 @@ load_state() {
   fi
   # shellcheck disable=SC1090
   . "$STATE_FILE"
-}
-
-endpoint_host() {
-  if [ "${HOST_IS_V6:-0}" = "1" ]; then
-    printf '[%s]' "$CLIENT_HOST"
-  else
-    printf '%s' "$CLIENT_HOST"
+  DUAL_STACK="${DUAL_STACK:-0}"
+  CLIENT_V4="${CLIENT_V4:-}"
+  CLIENT_V6="${CLIENT_V6:-}"
+  if [ -z "$CLIENT_V4" ] && [ "${HOST_IS_V6:-0}" = "0" ]; then
+    CLIENT_V4="$CLIENT_HOST"
+  fi
+  if [ -z "$CLIENT_V6" ] && [ "${HOST_IS_V6:-0}" = "1" ]; then
+    CLIENT_V6="$CLIENT_HOST"
   fi
 }
 
+fmt_host() {
+  case "$1" in
+    *:*) printf '[%s]' "$1" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 reality_link() {
-  printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#Suoha-REALITY' \
-    "$UUID" "$(endpoint_host)" "$PORT" "$REALITY_SNI" "$REALITY_PUB" "$SID"
+  local host="$1" tag="${2:-Suoha-REALITY}"
+  printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s' \
+    "$UUID" "$(fmt_host "$host")" "$PORT" "$REALITY_SNI" "$REALITY_PUB" "$SID" "$tag"
 }
 
 hysteria_link() {
+  local host="$1" tag="${2:-Suoha-Hysteria2}"
   local params="sni=$HY_SNI&insecure=1"
   if [ -n "${HY_PIN:-}" ]; then
     params="$params&pinSHA256=$HY_PIN"
   fi
-  printf 'hysteria2://%s@%s:%s/?%s#Suoha-Hysteria2' \
-    "$HY_PASS" "$(endpoint_host)" "$HY_PORT" "$params"
+  printf 'hysteria2://%s@%s:%s/?%s#%s' \
+    "$HY_PASS" "$(fmt_host "$host")" "$HY_PORT" "$params" "$tag"
 }
 
-write_clash_config() {
-  local server="$CLIENT_HOST"
-  {
-    cat <<EOF
-mixed-port: 7890
-allow-lan: false
-mode: rule
-log-level: info
-ipv6: true
-proxies:
-  - name: "Suoha-REALITY"
+clash_proxies_for() {
+  local server="$1" suffix="$2"
+  cat <<EOF
+  - name: "Suoha-REALITY$suffix"
     type: vless
     server: "$server"
     port: $PORT
@@ -672,9 +699,9 @@ proxies:
       public-key: "$REALITY_PUB"
       short-id: "$SID"
 EOF
-    if [ "$HY_ENABLED" = "1" ]; then
-      cat <<EOF
-  - name: "Suoha-Hysteria2"
+  if [ "$HY_ENABLED" = "1" ]; then
+    cat <<EOF
+  - name: "Suoha-Hysteria2$suffix"
     type: hysteria2
     server: "$server"
     port: $HY_PORT
@@ -682,18 +709,48 @@ EOF
     sni: "$HY_SNI"
     skip-cert-verify: true
 EOF
+  fi
+}
+
+clash_group_members() {
+  local suffix="$1"
+  printf '      - "Suoha-REALITY%s"\n' "$suffix"
+  if [ "$HY_ENABLED" = "1" ]; then
+    printf '      - "Suoha-Hysteria2%s"\n' "$suffix"
+  fi
+}
+
+write_clash_config() {
+  local dual="${DUAL_STACK:-0}" s4="" s6=""
+  if [ "$dual" = "1" ] && [ -n "${CLIENT_V6:-}" ]; then
+    s4="-v4"
+    s6="-v6"
+  else
+    dual=0
+  fi
+
+  {
+    cat <<EOF
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: true
+proxies:
+EOF
+    clash_proxies_for "${CLIENT_V4:-$CLIENT_HOST}" "$s4"
+    if [ "$dual" = "1" ]; then
+      clash_proxies_for "$CLIENT_V6" "$s6"
     fi
     cat <<EOF
 proxy-groups:
   - name: "Auto"
     type: url-test
     proxies:
-      - "Suoha-REALITY"
 EOF
-    if [ "$HY_ENABLED" = "1" ]; then
-      cat <<EOF
-      - "Suoha-Hysteria2"
-EOF
+    clash_group_members "$s4"
+    if [ "$dual" = "1" ]; then
+      clash_group_members "$s6"
     fi
     cat <<EOF
     url: "https://www.gstatic.com/generate_204"
@@ -710,6 +767,16 @@ EOF
   chmod 600 "$CLASH_FILE"
 }
 
+print_node_links() {
+  local host="$1" suffix="$2"
+  printf "  REALITY:\n  %s\n\n" "$(reality_link "$host" "Suoha-REALITY$suffix")"
+  if [ "$HY_ENABLED" = "1" ]; then
+    printf "  Hysteria2:\n  %s\n\n" "$(hysteria_link "$host" "Suoha-Hysteria2$suffix")"
+  else
+    printf "  Hysteria2: 未启用\n\n"
+  fi
+}
+
 show_links() {
   need_root
   load_state
@@ -717,11 +784,13 @@ show_links() {
   line
   printf "  %s\n" "客户端节点"
   line
-  printf "  REALITY (推荐):\n  %s\n\n" "$(reality_link)"
-  if [ "$HY_ENABLED" = "1" ]; then
-    printf "  Hysteria2:\n  %s\n\n" "$(hysteria_link)"
+  if [ "${DUAL_STACK:-0}" = "1" ] && [ -n "${CLIENT_V6:-}" ]; then
+    printf "  ===== IPv4 =====\n"
+    print_node_links "$CLIENT_V4" "-v4"
+    printf "  ===== IPv6 =====\n"
+    print_node_links "$CLIENT_V6" "-v6"
   else
-    printf "  Hysteria2: 未启用\n\n"
+    print_node_links "$CLIENT_HOST" ""
   fi
   printf "  Clash Meta 配置: %s\n" "$CLASH_FILE"
   printf "  配置中的 Auto 组会每 300 秒测速，自动选择更快的通道。\n"
@@ -736,7 +805,12 @@ show_status() {
   printf "  %s\n" "Suoha 智能代理状态"
   line
   printf "  系统      : %s / %s\n" "$(uname -s)" "$(uname -m)"
-  printf "  节点地址  : %s\n" "$CLIENT_HOST"
+  if [ -n "${CLIENT_V4:-}" ]; then
+    printf "  IPv4      : %s\n" "$CLIENT_V4"
+  fi
+  if [ -n "${CLIENT_V6:-}" ]; then
+    printf "  IPv6      : %s\n" "$CLIENT_V6"
+  fi
   printf "  REALITY   : TCP %s, SNI %s\n" "$PORT" "$REALITY_SNI"
   if [ "$HY_ENABLED" = "1" ]; then
     printf "  Hysteria2 : UDP %s, SNI %s\n" "$HY_PORT" "$HY_SNI"
@@ -772,7 +846,11 @@ show_summary() {
   else
     printf "  备通道  : 未启用（自动降级）\n"
   fi
-  printf "  节点 IP : %s\n" "$CLIENT_HOST"
+  if [ "${DUAL_STACK:-0}" = "1" ] && [ -n "${CLIENT_V6:-}" ]; then
+    printf "  节点 IP : %s / %s\n" "$CLIENT_V4" "$CLIENT_V6"
+  else
+    printf "  节点 IP : %s\n" "$(fmt_host "$CLIENT_HOST")"
+  fi
   printf "  伪装目标: %s\n" "$REALITY_SNI"
   printf "  服务名  : suoha-xray"
   [ "$HY_ENABLED" = "1" ] && printf ", suoha-hysteria"

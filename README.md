@@ -26,10 +26,18 @@ wget -O suoha.sh https://raw.githubusercontent.com/a363087690/suoha-A/main/suoha
 - 公网 IPv4 或 IPv6
 - 放行 TCP 443 与 UDP 8443
 
+支持三种网络环境：
+
+| 环境 | 监听 | 下发节点 |
+| --- | --- | --- |
+| 仅 IPv4 | `0.0.0.0` | IPv4 |
+| 仅 IPv6 | `[::]` | IPv6 |
+| IPv4 + IPv6 | `[::]` 双栈 | IPv4 和 IPv6 各一组，Clash 自动择优 |
+
 ## 脚本会自动完成
 
-- 识别系统、CPU 架构、公网 IP
-- 测速挑选最快的 REALITY 伪装目标（SNI）
+- 识别系统、CPU 架构、公网 IP（单栈 v4 / 单栈 v6 / 双栈）
+- 测速挑选最快的 REALITY 伪装目标（SNI），纯 IPv6 环境按 v6 测速
 - 443 / 8443 被占用时自动换端口
 - Hysteria2 部署失败自动降级为纯 REALITY
 - 开启 BBR + fq，优化文件句柄
